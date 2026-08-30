@@ -7,11 +7,12 @@ from src.config import settings
 from src.ingestion.chunker import SemanticChunker, Chunk
 from src.retrieval.hybrid_search import HybridSearchEngine, SearchResult
 from src.retrieval.reranker import CrossEncoderReranker, RerankResult
+from src.observability.tracer import tracer, TraceRecord
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Engine with Hybrid Search (Dense + BM25), Cross-Encoder Re-ranking and Evals.",
-    version=settings.VERSION
+    description="Enterprise RAG Engine with Hybrid Search (Dense + BM25), Cross-Encoder Re-ranking and Langfuse Observability.",
+    version="0.4.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -54,22 +55,28 @@ class DocumentCitation(BaseModel):
 
 class QueryRequest(BaseModel):
     query: str = Field(..., example="What are the requirements for IAM roles?")
+    user_id: Optional[str] = Field(default="user_enterprise_102")
+    session_id: Optional[str] = Field(default="sess_demo_401")
     top_k: int = Field(default=5, ge=1, le=20)
     use_reranker: bool = Field(default=True)
 
-class PipelineMetrics(BaseModel):
+class ObservabilitySummary(BaseModel):
+    trace_id: str
+    total_latency_ms: float
     retrieval_latency_ms: float
     rerank_latency_ms: float
-    total_latency_ms: float
-    candidates_retrieved: int
-    chunks_sent_to_llm: int
-    tokens_saved_estimate: int
+    generation_latency_ms: float
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    estimated_cost_usd: float
+    tokens_saved_by_reranker: int
 
 class QueryResponse(BaseModel):
     query: str
     answer: str
     citations: List[DocumentCitation]
-    metrics: PipelineMetrics
+    observability: ObservabilitySummary
     model: str
     retrieval_strategy: str
 
@@ -80,7 +87,8 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": settings.VERSION,
+        "version": "0.4.0",
+        "observability_provider": "Langfuse & OpenTelemetry",
         "reranker_model": reranker.model_name
     }
 
@@ -118,15 +126,21 @@ async def rerank_candidates_endpoint(payload: RerankRequest):
 @app.post("/api/v1/query", response_model=QueryResponse)
 async def query_knowledge_base(payload: QueryRequest):
     """
-    End-to-End Enterprise RAG Pipeline:
-    1. Hybrid Search Retrieval (Dense + BM25) ➔ Top 20 Candidates
-    2. Cross-Encoder Re-ranker ➔ Top 5 Pure-Signal Chunks
-    3. LLM Prompt Synthesis with Verified Source Citations
+    End-to-End Enterprise RAG Pipeline with Distributed Tracing:
+    1. Hybrid Search Retrieval (Dense + BM25) ➔ Span 1
+    2. Cross-Encoder Re-ranker (Top 20 ➔ Top 5) ➔ Span 2
+    3. LLM Generation + Token Cost Attribution ➔ Generation Span
     """
-    total_start = time.time()
+    # Initialize Root Trace in Langfuse
+    trace = tracer.start_trace(
+        name="enterprise_rag_query",
+        session_id=payload.session_id,
+        user_id=payload.user_id,
+        tags=["rag-prod", "hybrid-search", "bge-reranker"]
+    )
     
-    # Step 1: Hybrid Retrieval
-    retrieval_start = time.time()
+    # --- SPAN 1: Hybrid Retrieval ---
+    span1_start = time.time()
     mock_dense = [
         {"id": "chunk_1", "document_id": "doc_101", "content": "General networking rules for VPC peering.", "page_number": 1},
         {"id": "chunk_2", "document_id": "doc_101", "content": "All IAM roles must enforce mandatory MFA authentication on sensitive API calls.", "page_number": 3},
@@ -137,10 +151,18 @@ async def query_knowledge_base(payload: QueryRequest):
         {"id": "chunk_4", "document_id": "doc_102", "content": "IAM role policies template definition.", "page_number": 2},
     ]
     initial_candidates = hybrid_engine.reciprocal_rank_fusion(mock_dense, mock_sparse, top_k=10)
-    retrieval_latency = round((time.time() - retrieval_start) * 1000, 2)
-    
-    # Step 2: Cross-Encoder Re-ranking
-    rerank_start = time.time()
+    span1_end = time.time()
+    tracer.add_span(
+        trace_id=trace.trace_id,
+        name="hybrid_retrieval_pgvector",
+        start_time=span1_start,
+        end_time=span1_end,
+        input_data={"query": payload.query, "top_k_requested": 10},
+        output_data={"candidates_found": len(initial_candidates)}
+    )
+
+    # --- SPAN 2: Cross-Encoder Re-ranking ---
+    span2_start = time.time()
     if payload.use_reranker:
         candidate_dicts = [
             {"id": c.chunk_id, "content": c.content, "score": c.score, "page_number": c.page_number}
@@ -158,11 +180,42 @@ async def query_knowledge_base(payload: QueryRequest):
             )
             for idx, c in enumerate(initial_candidates[:payload.top_k])
         ]
-    rerank_latency = round((time.time() - rerank_start) * 1000, 2)
+    span2_end = time.time()
+    tracer.add_span(
+        trace_id=trace.trace_id,
+        name="cross_encoder_rerank",
+        start_time=span2_start,
+        end_time=span2_end,
+        input_data={"candidates_count": len(initial_candidates)},
+        output_data={"final_chunks_count": len(reranked_results), "model": reranker.model_name}
+    )
+
+    # --- SPAN 3: LLM Generation ---
+    span3_start = time.time()
+    # Simulated model response generation
+    answer_text = "All privileged IAM roles must enforce Multi-Factor Authentication (MFA) on sensitive API calls as specified in Section 3 of the security baseline."
+    prompt_tokens = 450   # 5 filtered chunks + system guardrail
+    completion_tokens = 65
+    span3_end = time.time()
     
-    total_latency = round((time.time() - total_start) * 1000, 2)
-    
-    # Format verifiable citations
+    tracer.add_span(
+        trace_id=trace.trace_id,
+        name="llm_generation",
+        start_time=span3_start,
+        end_time=span3_end,
+        input_data={"prompt_tokens": prompt_tokens, "model": "gpt-4o-mini"},
+        output_data={"completion_tokens": completion_tokens, "answer_length": len(answer_text)}
+    )
+
+    # Finalize Root Trace & calculate dollar cost
+    final_trace = tracer.end_trace(
+        trace_id=trace.trace_id,
+        model="gpt-4o-mini",
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens
+    )
+
+    # Format verified source citations
     citations = [
         DocumentCitation(
             document_title="AWS Security Architecture Whitepaper",
@@ -175,21 +228,33 @@ async def query_knowledge_base(payload: QueryRequest):
         )
         for r in reranked_results
     ]
-    
-    tokens_saved = (len(initial_candidates) - len(reranked_results)) * 120  # ~120 tokens per discarded chunk
-    
+
+    tokens_saved = (len(initial_candidates) - len(reranked_results)) * 120
+
     return {
         "query": payload.query,
-        "answer": "All privileged IAM roles must enforce Multi-Factor Authentication (MFA) as outlined in the security baseline.",
+        "answer": answer_text,
         "citations": citations,
-        "metrics": {
-            "retrieval_latency_ms": retrieval_latency,
-            "rerank_latency_ms": rerank_latency,
-            "total_latency_ms": total_latency,
-            "candidates_retrieved": len(initial_candidates),
-            "chunks_sent_to_llm": len(reranked_results),
-            "tokens_saved_estimate": tokens_saved
+        "observability": {
+            "trace_id": final_trace.trace_id,
+            "total_latency_ms": final_trace.total_latency_ms,
+            "retrieval_latency_ms": round((span1_end - span1_start) * 1000, 2),
+            "rerank_latency_ms": round((span2_end - span2_start) * 1000, 2),
+            "generation_latency_ms": round((span3_end - span3_start) * 1000, 2),
+            "prompt_tokens": final_trace.prompt_tokens,
+            "completion_tokens": final_trace.completion_tokens,
+            "total_tokens": final_trace.total_tokens,
+            "estimated_cost_usd": final_trace.cost_usd,
+            "tokens_saved_by_reranker": tokens_saved
         },
         "model": "gpt-4o-mini",
-        "retrieval_strategy": "2-Stage: Hybrid Search (RRF) ➔ Cross-Encoder Reranking"
+        "retrieval_strategy": "2-Stage Hybrid (RRF) ➔ Cross-Encoder with Langfuse Tracing"
     }
+
+@app.get("/api/v1/observability/trace/{trace_id}", response_model=TraceRecord)
+async def get_trace_telemetry(trace_id: str):
+    """Retrieves full hierarchical span tree and telemetry for a given trace ID."""
+    trace = tracer._active_traces.get(trace_id)
+    if not trace:
+        raise HTTPException(status_code=404, detail="Trace ID not found.")
+    return trace
