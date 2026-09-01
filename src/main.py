@@ -8,11 +8,12 @@ from src.ingestion.chunker import SemanticChunker, Chunk
 from src.retrieval.hybrid_search import HybridSearchEngine, SearchResult
 from src.retrieval.reranker import CrossEncoderReranker, RerankResult
 from src.observability.tracer import tracer, TraceRecord
+from src.evals.ragas_evaluator import evaluator, EvalSample, EvalReport, MetricResult
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Engine with Hybrid Search (Dense + BM25), Cross-Encoder Re-ranking and Langfuse Observability.",
-    version="0.4.0"
+    description="Enterprise RAG Platform: Hybrid Search (HNSW + GIN), Cross-Encoder Re-ranking, Langfuse Tracing and Automated Evals (Ragas).",
+    version="0.5.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -87,7 +88,8 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.4.0",
+        "version": "0.5.0",
+        "evals_suite": "Ragas (Faithfulness, Relevance, Recall, Precision)",
         "observability_provider": "Langfuse & OpenTelemetry",
         "reranker_model": reranker.model_name
     }
@@ -131,7 +133,6 @@ async def query_knowledge_base(payload: QueryRequest):
     2. Cross-Encoder Re-ranker (Top 20 ➔ Top 5) ➔ Span 2
     3. LLM Generation + Token Cost Attribution ➔ Generation Span
     """
-    # Initialize Root Trace in Langfuse
     trace = tracer.start_trace(
         name="enterprise_rag_query",
         session_id=payload.session_id,
@@ -139,7 +140,7 @@ async def query_knowledge_base(payload: QueryRequest):
         tags=["rag-prod", "hybrid-search", "bge-reranker"]
     )
     
-    # --- SPAN 1: Hybrid Retrieval ---
+    # SPAN 1: Retrieval
     span1_start = time.time()
     mock_dense = [
         {"id": "chunk_1", "document_id": "doc_101", "content": "General networking rules for VPC peering.", "page_number": 1},
@@ -161,7 +162,7 @@ async def query_knowledge_base(payload: QueryRequest):
         output_data={"candidates_found": len(initial_candidates)}
     )
 
-    # --- SPAN 2: Cross-Encoder Re-ranking ---
+    # SPAN 2: Re-ranking
     span2_start = time.time()
     if payload.use_reranker:
         candidate_dicts = [
@@ -190,11 +191,10 @@ async def query_knowledge_base(payload: QueryRequest):
         output_data={"final_chunks_count": len(reranked_results), "model": reranker.model_name}
     )
 
-    # --- SPAN 3: LLM Generation ---
+    # SPAN 3: LLM Generation
     span3_start = time.time()
-    # Simulated model response generation
     answer_text = "All privileged IAM roles must enforce Multi-Factor Authentication (MFA) on sensitive API calls as specified in Section 3 of the security baseline."
-    prompt_tokens = 450   # 5 filtered chunks + system guardrail
+    prompt_tokens = 450
     completion_tokens = 65
     span3_end = time.time()
     
@@ -207,7 +207,6 @@ async def query_knowledge_base(payload: QueryRequest):
         output_data={"completion_tokens": completion_tokens, "answer_length": len(answer_text)}
     )
 
-    # Finalize Root Trace & calculate dollar cost
     final_trace = tracer.end_trace(
         trace_id=trace.trace_id,
         model="gpt-4o-mini",
@@ -215,7 +214,6 @@ async def query_knowledge_base(payload: QueryRequest):
         completion_tokens=completion_tokens
     )
 
-    # Format verified source citations
     citations = [
         DocumentCitation(
             document_title="AWS Security Architecture Whitepaper",
@@ -250,6 +248,40 @@ async def query_knowledge_base(payload: QueryRequest):
         "model": "gpt-4o-mini",
         "retrieval_strategy": "2-Stage Hybrid (RRF) ➔ Cross-Encoder with Langfuse Tracing"
     }
+
+# --- EVALUATION ENDPOINTS ---
+
+@app.post("/api/v1/evals/run", response_model=EvalReport)
+async def run_automated_evals(samples: Optional[List[EvalSample]] = None):
+    """
+    Executes automated RAG Triad evaluation across a test dataset.
+    Returns Faithfulness, Answer Relevance, Context Recall and Context Precision scores.
+    """
+    test_samples = samples or [
+        EvalSample(
+            sample_id="eval_sample_01",
+            query="What are the IAM MFA requirements for administrative accounts?",
+            contexts=[
+                "All IAM administrative roles must enforce mandatory Multi-Factor Authentication (MFA) on all sensitive API calls.",
+                "Access keys must be rotated every 90 days."
+            ],
+            generated_answer="All IAM administrative roles must enforce mandatory MFA on sensitive API calls.",
+            ground_truth="Administrative IAM roles require mandatory MFA on sensitive calls."
+        ),
+        EvalSample(
+            sample_id="eval_sample_02",
+            query="What is the data retention period for audit logs?",
+            contexts=[
+                "Audit logs in S3 Glacier must be retained for a minimum of 365 days before permanent deletion.",
+                "Encryption keys are managed via AWS KMS."
+            ],
+            generated_answer="Audit logs must be retained for a minimum of 365 days in S3 Glacier.",
+            ground_truth="Audit logs must be kept for at least 365 days."
+        )
+    ]
+    
+    report = evaluator.evaluate_dataset(test_samples)
+    return report
 
 @app.get("/api/v1/observability/trace/{trace_id}", response_model=TraceRecord)
 async def get_trace_telemetry(trace_id: str):
