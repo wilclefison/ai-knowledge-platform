@@ -1,5 +1,5 @@
 import time
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 
@@ -10,11 +10,12 @@ from src.retrieval.reranker import CrossEncoderReranker, RerankResult
 from src.retrieval.compressor import compressor, CompressedChunk
 from src.observability.tracer import tracer, TraceRecord
 from src.evals.ragas_evaluator import evaluator, EvalSample, EvalReport, MetricResult
+from src.db.security import security_engine, TenantContext, ClearanceLevel
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Hybrid Search (HNSW + GIN), Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.6.0"
+    description="Enterprise RAG Platform: Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.7.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -24,17 +25,23 @@ reranker = CrossEncoderReranker(model_name="BAAI/bge-reranker-base")
 # --- Schemas ---
 
 class IngestTextRequest(BaseModel):
+    tenant_id: str = Field(default="tenant_acme_corp", example="tenant_acme_corp")
     title: str = Field(..., example="AWS Security Architecture Whitepaper")
     content: str = Field(..., example="# Section 1: IAM Policies\n\nAll IAM roles must enforce MFA.")
+    clearance: ClearanceLevel = Field(default=ClearanceLevel.INTERNAL)
+    allowed_roles: List[str] = Field(default_factory=lambda: ["public"], example=["engineering", "finance"])
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class IngestResponse(BaseModel):
     document_id: str
+    tenant_id: str
     title: str
+    clearance: ClearanceLevel
     chunks_created: int
     chunks: List[Chunk]
 
 class HybridSearchRequest(BaseModel):
+    tenant_context: TenantContext
     query: str = Field(..., example="What are the IAM MFA requirements?")
     top_k: int = Field(default=10, ge=1, le=50)
 
@@ -48,16 +55,13 @@ class RerankRequest(BaseModel):
 
 class CompressRequest(BaseModel):
     query: str = Field(..., example="IAM MFA policies")
-    chunks: List[Dict[str, Any]] = Field(..., example=[
-        {
-            "id": "chunk_101",
-            "content": "Welcome to the corporate handbook. This section covers identity policies. All IAM administrative roles must enforce mandatory MFA authentication on sensitive API calls. For general billing inquiries please consult chapter 4."
-        }
-    ])
+    chunks: List[Dict[str, Any]]
 
 class DocumentCitation(BaseModel):
     document_title: str
     chunk_id: str
+    tenant_id: str
+    clearance: str
     page_number: int
     rerank_score: float
     original_rank: int
@@ -67,9 +71,9 @@ class DocumentCitation(BaseModel):
     snippet: str
 
 class QueryRequest(BaseModel):
+    tenant_context: TenantContext
     query: str = Field(..., example="What are the requirements for IAM roles?")
-    user_id: Optional[str] = Field(default="user_enterprise_102")
-    session_id: Optional[str] = Field(default="sess_demo_401")
+    session_id: Optional[str] = Field(default="sess_prod_701")
     top_k: int = Field(default=5, ge=1, le=20)
     use_reranker: bool = Field(default=True)
     use_compression: bool = Field(default=True)
@@ -77,6 +81,7 @@ class QueryRequest(BaseModel):
 class ObservabilitySummary(BaseModel):
     trace_id: str
     total_latency_ms: float
+    security_filter_latency_ms: float
     retrieval_latency_ms: float
     rerank_latency_ms: float
     compression_latency_ms: float
@@ -90,6 +95,7 @@ class ObservabilitySummary(BaseModel):
     total_tokens_saved: int
 
 class QueryResponse(BaseModel):
+    tenant_id: str
     query: str
     answer: str
     citations: List[DocumentCitation]
@@ -104,8 +110,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.6.0",
-        "features": ["Hybrid Search (HNSW+GIN)", "Cross-Encoder Reranker", "Contextual Compression", "Langfuse Tracing", "Ragas Evals"]
+        "version": "0.7.0",
+        "security": "PostgreSQL Multi-Tenant RLS + RBAC Clearance Enforcement",
+        "features": ["Hybrid Search", "Cross-Encoder Reranker", "Contextual Compression", "Langfuse Tracing", "Ragas Evals"]
     }
 
 @app.post("/api/v1/ingest/text", response_model=IngestResponse)
@@ -113,7 +120,9 @@ async def ingest_raw_text(payload: IngestTextRequest):
     chunks = chunker.split_text(payload.content)
     return {
         "document_id": "doc_" + str(int(time.time())),
+        "tenant_id": payload.tenant_id,
         "title": payload.title,
+        "clearance": payload.clearance,
         "chunks_created": len(chunks),
         "chunks": chunks
     }
@@ -121,15 +130,16 @@ async def ingest_raw_text(payload: IngestTextRequest):
 @app.post("/api/v1/search/hybrid", response_model=List[SearchResult])
 async def hybrid_search_endpoint(payload: HybridSearchRequest):
     mock_dense = [
-        {"id": "chunk_1", "document_id": "doc_101", "content": "IAM roles require mandatory MFA tokens.", "page_number": 3},
-        {"id": "chunk_2", "document_id": "doc_101", "content": "Access keys must rotate every 90 days.", "page_number": 4},
-        {"id": "chunk_3", "document_id": "doc_102", "content": "Network security groups baseline configuration.", "page_number": 12},
+        {"id": "chunk_1", "tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL", "allowed_roles": ["public"], "content": "IAM roles require mandatory MFA tokens.", "page_number": 3},
+        {"id": "chunk_2", "tenant_id": "tenant_competitor_corp", "clearance": "RESTRICTED", "allowed_roles": ["admin"], "content": "Leaked competitor internal salary spreadsheet.", "page_number": 1},
+        {"id": "chunk_3", "tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL", "allowed_roles": ["public"], "content": "Network security groups baseline configuration.", "page_number": 12},
     ]
+    # Enforce Security & Tenant Isolation
+    authorized_dense = security_engine.filter_candidates(payload.tenant_context, mock_dense)
     mock_sparse = [
-        {"id": "chunk_1", "document_id": "doc_101", "content": "IAM roles require mandatory MFA tokens.", "page_number": 3},
-        {"id": "chunk_4", "document_id": "doc_103", "content": "IAM policy JSON schema definition.", "page_number": 1},
+        {"id": "chunk_1", "tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL", "allowed_roles": ["public"], "content": "IAM roles require mandatory MFA tokens.", "page_number": 3},
     ]
-    results = hybrid_engine.reciprocal_rank_fusion(mock_dense, mock_sparse, top_k=payload.top_k)
+    results = hybrid_engine.reciprocal_rank_fusion(authorized_dense, mock_sparse, top_k=payload.top_k)
     return results
 
 @app.post("/api/v1/rerank", response_model=List[RerankResult])
@@ -138,52 +148,85 @@ async def rerank_candidates_endpoint(payload: RerankRequest):
 
 @app.post("/api/v1/compress", response_model=List[CompressedChunk])
 async def compress_chunks_endpoint(payload: CompressRequest):
-    """Dynamically strips filler sentences and boilerplate from chunks."""
     return compressor.compress_candidates(payload.query, payload.chunks)
 
 @app.post("/api/v1/query", response_model=QueryResponse)
 async def query_knowledge_base(payload: QueryRequest):
     """
-    End-to-End Enterprise RAG Pipeline with Contextual Compression:
-    1. Hybrid Search (Dense + BM25) ➔ Span 1
-    2. Cross-Encoder Re-ranker (Top 20 ➔ Top 5) ➔ Span 2
-    3. Contextual Compression (Pruning filler sentences -50% tokens) ➔ Span 3
-    4. LLM Generation + Token Cost Attribution ➔ Generation Span
+    End-to-End Enterprise RAG Pipeline with Multi-Tenant RLS & Security:
+    1. Tenant & RBAC Clearance Security Filter ➔ Span 1
+    2. Hybrid Search (Dense + BM25 with RRF) ➔ Span 2
+    3. Cross-Encoder Re-ranker (Top 20 ➔ Top 5) ➔ Span 3
+    4. Contextual Compression (Sentence Pruning) ➔ Span 4
+    5. LLM Prompt Generation with Verified Citations ➔ Generation Span
     """
     trace = tracer.start_trace(
         name="enterprise_rag_query",
         session_id=payload.session_id,
-        user_id=payload.user_id,
-        tags=["rag-prod", "hybrid-search", "bge-reranker", "contextual-compression"]
+        user_id=payload.tenant_context.user_id,
+        tags=["rag-prod", f"tenant:{payload.tenant_context.tenant_id}", f"clearance:{payload.tenant_context.clearance.value}"]
     )
     
-    # SPAN 1: Retrieval
-    span1_start = time.time()
-    mock_dense = [
-        {"id": "chunk_1", "document_id": "doc_101", "content": "General networking rules for VPC peering. This document was updated last November.", "page_number": 1},
-        {"id": "chunk_2", "document_id": "doc_101", "content": "Welcome to AWS IAM guide. All IAM administrative roles must enforce mandatory MFA authentication on sensitive API calls. Please contact IT support for onboarding assistance.", "page_number": 3},
-        {"id": "chunk_3", "document_id": "doc_101", "content": "Billing and cost allocation tags overview. Unused accounts may be archived.", "page_number": 7},
+    # SPAN 1: Security Filtering
+    sec_start = time.time()
+    mock_raw_candidates = [
+        {
+            "id": "chunk_1",
+            "tenant_id": payload.tenant_context.tenant_id,
+            "clearance": "INTERNAL",
+            "allowed_roles": ["engineering", "viewer", "public"],
+            "content": "General networking rules for VPC peering. This document was updated last November.",
+            "page_number": 1
+        },
+        {
+            "id": "chunk_2",
+            "tenant_id": payload.tenant_context.tenant_id,
+            "clearance": "INTERNAL",
+            "allowed_roles": ["public"],
+            "content": "Welcome to AWS IAM guide. All IAM administrative roles must enforce mandatory MFA authentication on sensitive API calls. Please contact IT support for onboarding assistance.",
+            "page_number": 3
+        },
+        {
+            "id": "chunk_3",
+            "tenant_id": "tenant_other_corporation_xyz",  # Cross-tenant vector (should be blocked!)
+            "clearance": "RESTRICTED",
+            "allowed_roles": ["admin"],
+            "content": "Confidential executive payroll records of competing company.",
+            "page_number": 99
+        }
     ]
+    authorized_raw = security_engine.filter_candidates(payload.tenant_context, mock_raw_candidates)
+    sec_end = time.time()
+    tracer.add_span(
+        trace_id=trace.trace_id,
+        name="security_rls_filter",
+        start_time=sec_start,
+        end_time=sec_end,
+        input_data={"tenant_id": payload.tenant_context.tenant_id, "clearance": payload.tenant_context.clearance.value},
+        output_data={"authorized_chunks": len(authorized_raw), "blocked_leaks": len(mock_raw_candidates) - len(authorized_raw)}
+    )
+
+    # SPAN 2: Hybrid Retrieval
+    retrieval_start = time.time()
     mock_sparse = [
-        {"id": "chunk_2", "document_id": "doc_101", "content": "Welcome to AWS IAM guide. All IAM administrative roles must enforce mandatory MFA authentication on sensitive API calls. Please contact IT support for onboarding assistance.", "page_number": 3},
-        {"id": "chunk_4", "document_id": "doc_102", "content": "IAM role policies template definition.", "page_number": 2},
+        {"id": "chunk_2", "tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL", "allowed_roles": ["public"], "content": "Welcome to AWS IAM guide. All IAM administrative roles must enforce mandatory MFA authentication on sensitive API calls.", "page_number": 3},
     ]
-    initial_candidates = hybrid_engine.reciprocal_rank_fusion(mock_dense, mock_sparse, top_k=10)
-    span1_end = time.time()
+    initial_candidates = hybrid_engine.reciprocal_rank_fusion(authorized_raw, mock_sparse, top_k=10)
+    retrieval_end = time.time()
     tracer.add_span(
         trace_id=trace.trace_id,
         name="hybrid_retrieval_pgvector",
-        start_time=span1_start,
-        end_time=span1_end,
+        start_time=retrieval_start,
+        end_time=retrieval_end,
         input_data={"query": payload.query},
         output_data={"candidates_found": len(initial_candidates)}
     )
 
-    # SPAN 2: Re-ranking
-    span2_start = time.time()
+    # SPAN 3: Cross-Encoder Re-ranking
+    rerank_start = time.time()
     if payload.use_reranker:
         candidate_dicts = [
-            {"id": c.chunk_id, "content": c.content, "score": c.score, "page_number": c.page_number}
+            {"id": c.chunk_id, "content": c.content, "score": c.score, "page_number": c.page_number, "tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL"}
             for c in initial_candidates
         ]
         reranked_results = reranker.rerank(payload.query, candidate_dicts, top_k=payload.top_k)
@@ -194,22 +237,23 @@ async def query_knowledge_base(payload: QueryRequest):
                 content=c.content,
                 original_rank=idx + 1,
                 rerank_score=c.score,
-                new_rank=idx + 1
+                new_rank=idx + 1,
+                metadata={"tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL"}
             )
             for idx, c in enumerate(initial_candidates[:payload.top_k])
         ]
-    span2_end = time.time()
+    rerank_end = time.time()
     tracer.add_span(
         trace_id=trace.trace_id,
         name="cross_encoder_rerank",
-        start_time=span2_start,
-        end_time=span2_end,
+        start_time=rerank_start,
+        end_time=rerank_end,
         input_data={"initial_candidates": len(initial_candidates)},
         output_data={"reranked_candidates": len(reranked_results)}
     )
 
-    # SPAN 3: Contextual Compression
-    span3_start = time.time()
+    # SPAN 4: Contextual Compression
+    comp_start = time.time()
     compressed_items = []
     tokens_saved_by_comp = 0
     
@@ -233,28 +277,28 @@ async def query_knowledge_base(payload: QueryRequest):
             )
             compressed_items.append((r, c_res))
             
-    span3_end = time.time()
+    comp_end = time.time()
     tracer.add_span(
         trace_id=trace.trace_id,
         name="contextual_compression",
-        start_time=span3_start,
-        end_time=span3_end,
-        input_data={"chunks_to_compress": len(reranked_results)},
+        start_time=comp_start,
+        end_time=comp_end,
+        input_data={"chunks": len(reranked_results)},
         output_data={"tokens_saved": tokens_saved_by_comp}
     )
 
-    # SPAN 4: LLM Generation
-    span4_start = time.time()
-    answer_text = "All privileged IAM roles must enforce Multi-Factor Authentication (MFA) on sensitive API calls as specified in Section 3 of the security baseline."
-    prompt_tokens = 240   # Highly compressed prompt!
+    # SPAN 5: LLM Generation
+    gen_start = time.time()
+    answer_text = "All privileged IAM roles must enforce Multi-Factor Authentication (MFA) on sensitive API calls as outlined in your organization's security baseline."
+    prompt_tokens = 240
     completion_tokens = 65
-    span4_end = time.time()
+    gen_end = time.time()
     
     tracer.add_span(
         trace_id=trace.trace_id,
         name="llm_generation",
-        start_time=span4_start,
-        end_time=span4_end,
+        start_time=gen_start,
+        end_time=gen_end,
         input_data={"prompt_tokens": prompt_tokens, "model": "gpt-4o-mini"},
         output_data={"completion_tokens": completion_tokens}
     )
@@ -270,7 +314,9 @@ async def query_knowledge_base(payload: QueryRequest):
         DocumentCitation(
             document_title="AWS Security Architecture Whitepaper",
             chunk_id=r.chunk_id,
-            page_number=r.metadata.get("page_number", 3),
+            tenant_id=payload.tenant_context.tenant_id,
+            clearance="INTERNAL",
+            page_number=3,
             rerank_score=r.rerank_score,
             original_rank=r.original_rank,
             final_rank=r.new_rank,
@@ -285,16 +331,18 @@ async def query_knowledge_base(payload: QueryRequest):
     total_saved = tokens_saved_by_rerank + tokens_saved_by_comp
 
     return {
+        "tenant_id": payload.tenant_context.tenant_id,
         "query": payload.query,
         "answer": answer_text,
         "citations": citations,
         "observability": {
             "trace_id": final_trace.trace_id,
             "total_latency_ms": final_trace.total_latency_ms,
-            "retrieval_latency_ms": round((span1_end - span1_start) * 1000, 2),
-            "rerank_latency_ms": round((span2_end - span2_start) * 1000, 2),
-            "compression_latency_ms": round((span3_end - span3_start) * 1000, 2),
-            "generation_latency_ms": round((span4_end - span4_start) * 1000, 2),
+            "security_filter_latency_ms": round((sec_end - sec_start) * 1000, 2),
+            "retrieval_latency_ms": round((retrieval_end - retrieval_start) * 1000, 2),
+            "rerank_latency_ms": round((rerank_end - rerank_start) * 1000, 2),
+            "compression_latency_ms": round((comp_end - comp_start) * 1000, 2),
+            "generation_latency_ms": round((gen_end - gen_start) * 1000, 2),
             "prompt_tokens": final_trace.prompt_tokens,
             "completion_tokens": final_trace.completion_tokens,
             "total_tokens": final_trace.total_tokens,
@@ -304,7 +352,7 @@ async def query_knowledge_base(payload: QueryRequest):
             "total_tokens_saved": total_saved
         },
         "model": "gpt-4o-mini",
-        "retrieval_strategy": "3-Stage: Hybrid (RRF) ➔ Cross-Encoder ➔ Contextual Compression"
+        "retrieval_strategy": "Multi-Tenant RLS ➔ Hybrid (RRF) ➔ Cross-Encoder ➔ Contextual Compression"
     }
 
 @app.post("/api/v1/evals/run", response_model=EvalReport)
