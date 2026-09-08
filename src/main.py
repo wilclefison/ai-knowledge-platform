@@ -9,14 +9,15 @@ from src.ingestion.parent_retriever import parent_retriever, ParentDocument, Hie
 from src.retrieval.hybrid_search import HybridSearchEngine, SearchResult
 from src.retrieval.reranker import CrossEncoderReranker, RerankResult
 from src.retrieval.compressor import compressor, CompressedChunk
+from src.retrieval.self_query import self_query_engine, ParsedSelfQuery
 from src.observability.tracer import tracer, TraceRecord
 from src.evals.ragas_evaluator import evaluator, EvalSample, EvalReport, MetricResult
 from src.db.security import security_engine, TenantContext, ClearanceLevel
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Parent-Document (Small-to-Big) Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.8.0"
+    description="Enterprise RAG Platform: Self-Querying & Dynamic SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.9.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -41,32 +42,8 @@ class IngestResponse(BaseModel):
     chunks_created: int
     chunks: List[Chunk]
 
-class HierarchicalIngestResponse(BaseModel):
-    parent_id: str
-    tenant_id: str
-    title: str
-    parent_token_count: int
-    child_micro_chunks_count: int
-    message: str = "Parent-Document indexed with micro-chunks for fine-grained retrieval"
-
-class HierarchicalSearchRequest(BaseModel):
-    tenant_context: TenantContext
-    query: str = Field(..., example="What are the IAM MFA requirements?")
-    top_k: int = Field(default=5, ge=1, le=20)
-
-class HybridSearchRequest(BaseModel):
-    tenant_context: TenantContext
-    query: str = Field(..., example="What are the IAM MFA requirements?")
-    top_k: int = Field(default=10, ge=1, le=50)
-
-class RerankRequest(BaseModel):
-    query: str = Field(..., example="IAM MFA requirements")
-    candidates: List[Dict[str, Any]]
-    top_k: int = Field(default=5, ge=1, le=20)
-
-class CompressRequest(BaseModel):
-    query: str = Field(..., example="IAM MFA policies")
-    chunks: List[Dict[str, Any]]
+class SelfQueryRequest(BaseModel):
+    query: str = Field(..., example="AWS IAM whitepapers in 2024 with rating > 4.5 for engineering")
 
 class DocumentCitation(BaseModel):
     document_title: str
@@ -83,15 +60,17 @@ class DocumentCitation(BaseModel):
 
 class QueryRequest(BaseModel):
     tenant_context: TenantContext
-    query: str = Field(..., example="What are the requirements for IAM roles?")
-    session_id: Optional[str] = Field(default="sess_prod_801")
+    query: str = Field(..., example="What are the IAM requirements for security in 2024?")
+    session_id: Optional[str] = Field(default="sess_prod_901")
     top_k: int = Field(default=5, ge=1, le=20)
+    use_self_query: bool = Field(default=True)
     use_reranker: bool = Field(default=True)
     use_compression: bool = Field(default=True)
 
 class ObservabilitySummary(BaseModel):
     trace_id: str
     total_latency_ms: float
+    self_query_parse_latency_ms: float
     security_filter_latency_ms: float
     retrieval_latency_ms: float
     rerank_latency_ms: float
@@ -108,6 +87,7 @@ class ObservabilitySummary(BaseModel):
 class QueryResponse(BaseModel):
     tenant_id: str
     query: str
+    parsed_self_query: Optional[ParsedSelfQuery] = None
     answer: str
     citations: List[DocumentCitation]
     observability: ObservabilitySummary
@@ -121,8 +101,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.8.0",
+        "version": "0.9.0",
         "features": [
+            "Self-Querying & Dynamic SQL Filters",
             "Parent-Document Retriever (Small-to-Big)",
             "PostgreSQL Multi-Tenant RLS",
             "Hybrid Search (HNSW+GIN with RRF)",
@@ -132,6 +113,11 @@ async def health_check():
             "Ragas Evals"
         ]
     }
+
+@app.post("/api/v1/search/self-query", response_model=ParsedSelfQuery)
+async def parse_self_query_endpoint(payload: SelfQueryRequest):
+    """Decomposes natural language query into clean semantic vector query + structured SQL filters."""
+    return self_query_engine.parse_query(payload.query)
 
 @app.post("/api/v1/ingest/text", response_model=IngestResponse)
 async def ingest_raw_text(payload: IngestTextRequest):
@@ -145,70 +131,33 @@ async def ingest_raw_text(payload: IngestTextRequest):
         "chunks": chunks
     }
 
-@app.post("/api/v1/ingest/hierarchical", response_model=HierarchicalIngestResponse)
-async def ingest_hierarchical_document(payload: IngestTextRequest):
-    """Indexes document using Parent-Document (Small-to-Big) architecture."""
-    parent_doc = parent_retriever.split_and_index(
-        tenant_id=payload.tenant_id,
-        title=payload.title,
-        text=payload.content,
-        metadata={"clearance": payload.clearance.value, "allowed_roles": payload.allowed_roles}
-    )
-    return {
-        "parent_id": parent_doc.parent_id,
-        "tenant_id": parent_doc.tenant_id,
-        "title": parent_doc.title,
-        "parent_token_count": parent_doc.token_count,
-        "child_micro_chunks_count": len(parent_doc.child_chunks),
-        "message": "Parent-Document indexed with micro-chunks for fine-grained retrieval"
-    }
-
-@app.post("/api/v1/search/hierarchical", response_model=List[HierarchicalSearchResult])
-async def search_hierarchical_endpoint(payload: HierarchicalSearchRequest):
-    """Resolves micro-chunk vector hits to rich parent documents."""
-    # Seed demonstration parent if empty
-    if not parent_retriever._parent_store:
-        parent_retriever.split_and_index(
-            tenant_id=payload.tenant_context.tenant_id,
-            title="AWS Enterprise Security Baseline",
-            text="Section 3: Identity and Access Management. All IAM administrative roles must enforce mandatory MFA authentication on sensitive API calls. Access keys must rotate every 90 days. Unused credentials will be archived after 30 days of inactivity."
-        )
-    
-    first_child_id = next(iter(parent_retriever._child_store.keys()))
-    resolved = parent_retriever.resolve_parent_from_child(first_child_id, score=0.965)
-    return [resolved] if resolved else []
-
-@app.post("/api/v1/search/hybrid", response_model=List[SearchResult])
-async def hybrid_search_endpoint(payload: HybridSearchRequest):
-    mock_dense = [
-        {"id": "chunk_1", "tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL", "allowed_roles": ["public"], "content": "IAM roles require mandatory MFA tokens.", "page_number": 3},
-        {"id": "chunk_2", "tenant_id": "tenant_competitor_corp", "clearance": "RESTRICTED", "allowed_roles": ["admin"], "content": "Leaked competitor internal salary spreadsheet.", "page_number": 1},
-        {"id": "chunk_3", "tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL", "allowed_roles": ["public"], "content": "Network security groups baseline configuration.", "page_number": 12},
-    ]
-    authorized_dense = security_engine.filter_candidates(payload.tenant_context, mock_dense)
-    mock_sparse = [
-        {"id": "chunk_1", "tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL", "allowed_roles": ["public"], "content": "IAM roles require mandatory MFA tokens.", "page_number": 3},
-    ]
-    results = hybrid_engine.reciprocal_rank_fusion(authorized_dense, mock_sparse, top_k=payload.top_k)
-    return results
-
-@app.post("/api/v1/rerank", response_model=List[RerankResult])
-async def rerank_candidates_endpoint(payload: RerankRequest):
-    return reranker.rerank(payload.query, payload.candidates, top_k=payload.top_k)
-
-@app.post("/api/v1/compress", response_model=List[CompressedChunk])
-async def compress_chunks_endpoint(payload: CompressRequest):
-    return compressor.compress_candidates(payload.query, payload.chunks)
-
 @app.post("/api/v1/query", response_model=QueryResponse)
 async def query_knowledge_base(payload: QueryRequest):
     trace = tracer.start_trace(
         name="enterprise_rag_query",
         session_id=payload.session_id,
         user_id=payload.tenant_context.user_id,
-        tags=["rag-prod", f"tenant:{payload.tenant_context.tenant_id}", "parent-document-pipeline"]
+        tags=["rag-prod", f"tenant:{payload.tenant_context.tenant_id}", "self-query-pipeline"]
     )
-    
+
+    # SPAN 1: Self-Querying Parser
+    sq_start = time.time()
+    parsed_sq = None
+    search_query = payload.query
+    if payload.use_self_query:
+        parsed_sq = self_query_engine.parse_query(payload.query)
+        search_query = parsed_sq.semantic_query
+    sq_end = time.time()
+    tracer.add_span(
+        trace_id=trace.trace_id,
+        name="self_query_parser",
+        start_time=sq_start,
+        end_time=sq_end,
+        input_data={"raw_query": payload.query},
+        output_data={"semantic_query": search_query, "filters_count": len(parsed_sq.filters) if parsed_sq else 0}
+    )
+
+    # SPAN 2: Security & Tenant Isolation Filter
     sec_start = time.time()
     mock_raw_candidates = [
         {
@@ -216,32 +165,44 @@ async def query_knowledge_base(payload: QueryRequest):
             "tenant_id": payload.tenant_context.tenant_id,
             "clearance": "INTERNAL",
             "allowed_roles": ["engineering", "viewer", "public"],
-            "content": "General networking rules for VPC peering. This document was updated last November.",
-            "page_number": 1
+            "content": "AWS IAM Architecture Guide (2024 Edition). All IAM administrative roles must enforce mandatory MFA authentication on sensitive API calls.",
+            "page_number": 3,
+            "metadata": {"year": 2024, "department": "engineering", "rating": 4.8}
         },
         {
             "id": "chunk_2",
             "tenant_id": payload.tenant_context.tenant_id,
             "clearance": "INTERNAL",
             "allowed_roles": ["public"],
-            "content": "Welcome to AWS IAM guide. All IAM administrative roles must enforce mandatory MFA authentication on sensitive API calls. Please contact IT support for onboarding assistance.",
-            "page_number": 3
+            "content": "Legacy IAM Guide (2020 Edition). General user password rules.",
+            "page_number": 1,
+            "metadata": {"year": 2020, "department": "engineering", "rating": 3.2}
         }
     ]
     authorized_raw = security_engine.filter_candidates(payload.tenant_context, mock_raw_candidates)
+    
+    # Apply Structured Metadata Filters (e.g., Year = 2024)
+    if parsed_sq and parsed_sq.filters:
+        for f in parsed_sq.filters:
+            if f.field == "year":
+                authorized_raw = [c for c in authorized_raw if c.get("metadata", {}).get("year") == f.value]
+            elif f.field == "rating" and f.operator == "gt":
+                authorized_raw = [c for c in authorized_raw if c.get("metadata", {}).get("rating", 0) > f.value]
+
     sec_end = time.time()
     tracer.add_span(
         trace_id=trace.trace_id,
-        name="security_rls_filter",
+        name="security_and_metadata_filter",
         start_time=sec_start,
         end_time=sec_end,
         input_data={"tenant_id": payload.tenant_context.tenant_id},
-        output_data={"authorized_chunks": len(authorized_raw)}
+        output_data={"filtered_candidates": len(authorized_raw)}
     )
 
+    # SPAN 3: Hybrid Retrieval
     retrieval_start = time.time()
     mock_sparse = [
-        {"id": "chunk_2", "tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL", "allowed_roles": ["public"], "content": "Welcome to AWS IAM guide. All IAM administrative roles must enforce mandatory MFA authentication on sensitive API calls.", "page_number": 3},
+        {"id": "chunk_1", "tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL", "allowed_roles": ["public"], "content": "AWS IAM Architecture Guide (2024 Edition). All IAM administrative roles must enforce mandatory MFA authentication on sensitive API calls.", "page_number": 3},
     ]
     initial_candidates = hybrid_engine.reciprocal_rank_fusion(authorized_raw, mock_sparse, top_k=10)
     retrieval_end = time.time()
@@ -250,17 +211,18 @@ async def query_knowledge_base(payload: QueryRequest):
         name="hybrid_retrieval_pgvector",
         start_time=retrieval_start,
         end_time=retrieval_end,
-        input_data={"query": payload.query},
+        input_data={"semantic_query": search_query},
         output_data={"candidates_found": len(initial_candidates)}
     )
 
+    # SPAN 4: Cross-Encoder Re-ranking
     rerank_start = time.time()
     if payload.use_reranker:
         candidate_dicts = [
             {"id": c.chunk_id, "content": c.content, "score": c.score, "page_number": c.page_number, "tenant_id": payload.tenant_context.tenant_id, "clearance": "INTERNAL"}
             for c in initial_candidates
         ]
-        reranked_results = reranker.rerank(payload.query, candidate_dicts, top_k=payload.top_k)
+        reranked_results = reranker.rerank(search_query, candidate_dicts, top_k=payload.top_k)
     else:
         reranked_results = [
             RerankResult(
@@ -283,13 +245,14 @@ async def query_knowledge_base(payload: QueryRequest):
         output_data={"reranked": len(reranked_results)}
     )
 
+    # SPAN 5: Contextual Compression
     comp_start = time.time()
     compressed_items = []
     tokens_saved_by_comp = 0
     
     if payload.use_compression:
         for r in reranked_results:
-            c_res = compressor.compress_chunk(payload.query, r.chunk_id, r.content)
+            c_res = compressor.compress_chunk(search_query, r.chunk_id, r.content)
             compressed_items.append((r, c_res))
             tokens_saved_by_comp += max(0, c_res.original_tokens - c_res.compressed_tokens)
     else:
@@ -317,9 +280,10 @@ async def query_knowledge_base(payload: QueryRequest):
         output_data={"tokens_saved": tokens_saved_by_comp}
     )
 
+    # SPAN 6: LLM Generation
     gen_start = time.time()
-    answer_text = "All privileged IAM roles must enforce Multi-Factor Authentication (MFA) on sensitive API calls as outlined in your organization's security baseline."
-    prompt_tokens = 240
+    answer_text = "According to the 2024 AWS Security Architecture Guide, all administrative IAM roles must enforce Multi-Factor Authentication (MFA) on sensitive API calls."
+    prompt_tokens = 220
     completion_tokens = 65
     gen_end = time.time()
     
@@ -341,7 +305,7 @@ async def query_knowledge_base(payload: QueryRequest):
 
     citations = [
         DocumentCitation(
-            document_title="AWS Security Architecture Whitepaper",
+            document_title="AWS Security Architecture Whitepaper (2024)",
             chunk_id=r.chunk_id,
             tenant_id=payload.tenant_context.tenant_id,
             clearance="INTERNAL",
@@ -362,11 +326,13 @@ async def query_knowledge_base(payload: QueryRequest):
     return {
         "tenant_id": payload.tenant_context.tenant_id,
         "query": payload.query,
+        "parsed_self_query": parsed_sq,
         "answer": answer_text,
         "citations": citations,
         "observability": {
             "trace_id": final_trace.trace_id,
             "total_latency_ms": final_trace.total_latency_ms,
+            "self_query_parse_latency_ms": round((sq_end - sq_start) * 1000, 2),
             "security_filter_latency_ms": round((sec_end - sec_start) * 1000, 2),
             "retrieval_latency_ms": round((retrieval_end - retrieval_start) * 1000, 2),
             "rerank_latency_ms": round((rerank_end - rerank_start) * 1000, 2),
@@ -381,7 +347,7 @@ async def query_knowledge_base(payload: QueryRequest):
             "total_tokens_saved": total_saved
         },
         "model": "gpt-4o-mini",
-        "retrieval_strategy": "Parent-Document (Small-to-Big) ➔ Multi-Tenant RLS ➔ Cross-Encoder ➔ Compression"
+        "retrieval_strategy": "Self-Querying (NL ➔ SQL) ➔ Multi-Tenant RLS ➔ Hybrid (RRF) ➔ Cross-Encoder ➔ Compression"
     }
 
 @app.post("/api/v1/evals/run", response_model=EvalReport)
@@ -389,7 +355,7 @@ async def run_automated_evals(samples: Optional[List[EvalSample]] = None):
     test_samples = samples or [
         EvalSample(
             sample_id="eval_sample_01",
-            query="What are the IAM MFA requirements?",
+            query="What are the IAM MFA requirements in 2024?",
             contexts=["All IAM administrative roles must enforce mandatory MFA on all sensitive API calls."],
             generated_answer="All IAM administrative roles must enforce mandatory MFA on sensitive API calls.",
             ground_truth="Administrative IAM roles require mandatory MFA on sensitive calls."
