@@ -15,11 +15,12 @@ from src.routing.query_router import query_router, RoutingDecision, RouteDestina
 from src.observability.tracer import tracer, TraceRecord
 from src.evals.ragas_evaluator import evaluator, EvalSample, EvalReport, MetricResult
 from src.db.security import security_engine, TenantContext, ClearanceLevel
+from src.ingestion.multimodal_parser import multimodal_parser, MultiModalParsedDoc, MultiModalChunk, ExtractedTable, VisualFigure
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.11.0"
+    description="Enterprise RAG Platform: Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.12.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -64,6 +65,41 @@ class IngestResponse(BaseModel):
     clearance: ClearanceLevel
     chunks_created: int
     chunks: List[Chunk]
+
+class IngestMultiModalRequest(BaseModel):
+    tenant_id: str = Field(default="tenant_acme_corp", example="tenant_acme_corp")
+    title: str = Field(..., example="Q3 2024 Financial Performance & Cloud Topology Report")
+    content: str = Field(..., example="Executive summary of operations with cloud costs.\n\nAll data is audited.")
+    raw_tables: Optional[List[List[List[str]]]] = Field(
+        default=None,
+        example=[
+            [["Metric", "Q2 2024", "Q3 2024"], ["Gross Margin", "72%", "76%"], ["Cloud Spend ($k)", "180", "145"]]
+        ]
+    )
+    visual_figures: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        example=[
+            {
+                "figure_type": "architectural_diagram",
+                "caption": "Multi-Region VPC Topology",
+                "summary": "Isolated private VPCs connected through Transit Gateway.",
+                "ocr_detected_text": ["Transit Gateway", "VPC us-east-1", "VPC eu-central-1"]
+            }
+        ]
+    )
+    clearance: ClearanceLevel = Field(default=ClearanceLevel.INTERNAL)
+
+class IngestMultiModalResponse(BaseModel):
+    document_id: str
+    tenant_id: str
+    title: str
+    text_blocks_count: int
+    tables_count: int
+    figures_count: int
+    total_chunks: int
+    tables: List[ExtractedTable]
+    figures: List[VisualFigure]
+    chunks: List[MultiModalChunk]
 
 class RouteClassifyRequest(BaseModel):
     query: str = Field(..., example="Quantos documentos temos cadastrados?")
@@ -130,8 +166,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.11.0",
+        "version": "0.12.0",
         "features": [
+            "Multi-Modal Document Ingestion (OCR & Table Extraction)",
             "Agentic Query Router & Multi-Path Dispatch",
             "Semantic Vector Cache (<5ms)",
             "Self-Querying SQL Filters",
@@ -144,6 +181,37 @@ async def health_check():
             "Ragas Evals"
         ]
     }
+
+@app.post("/api/v1/ingest/multimodal", response_model=IngestMultiModalResponse)
+async def ingest_multimodal_document(payload: IngestMultiModalRequest):
+    """
+    Multi-Modal Ingestion Pipeline:
+    - Extracts structured Markdown tables from matrices or text
+    - Identifies visual figures, OCR captions and architecture diagrams
+    - Injects schema definitions into table chunks to avoid hallucinated cell associations
+    - Preserves coordinates and modalities (TEXT, TABLE_MARKDOWN, VISUAL_FIGURE)
+    """
+    parsed_doc = multimodal_parser.process_document(
+        tenant_id=payload.tenant_id,
+        title=payload.title,
+        content=payload.content,
+        raw_tables=payload.raw_tables,
+        visual_figures=payload.visual_figures,
+        clearance=payload.clearance.value if hasattr(payload.clearance, "value") else str(payload.clearance)
+    )
+
+    return IngestMultiModalResponse(
+        document_id=parsed_doc.document_id,
+        tenant_id=parsed_doc.tenant_id,
+        title=parsed_doc.title,
+        text_blocks_count=parsed_doc.text_blocks_count,
+        tables_count=parsed_doc.tables_count,
+        figures_count=parsed_doc.figures_count,
+        total_chunks=len(parsed_doc.chunks),
+        tables=parsed_doc.tables,
+        figures=parsed_doc.figures,
+        chunks=parsed_doc.chunks
+    )
 
 @app.post("/api/v1/routing/classify", response_model=RoutingDecision)
 async def classify_query_route(payload: RouteClassifyRequest):
