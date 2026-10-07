@@ -16,11 +16,12 @@ from src.observability.tracer import tracer, TraceRecord
 from src.evals.ragas_evaluator import evaluator, EvalSample, EvalReport, MetricResult
 from src.db.security import security_engine, TenantContext, ClearanceLevel
 from src.ingestion.multimodal_parser import multimodal_parser, MultiModalParsedDoc, MultiModalChunk, ExtractedTable, VisualFigure
+from src.routing.planner import query_planner, QueryPlan, PlanExecutionResult
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.12.0"
+    description="Enterprise RAG Platform: Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.13.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -104,6 +105,10 @@ class IngestMultiModalResponse(BaseModel):
 class RouteClassifyRequest(BaseModel):
     query: str = Field(..., example="Quantos documentos temos cadastrados?")
 
+class PlanQueryRequest(BaseModel):
+    query: str = Field(..., example="Compare the financial margins of Q2 vs Q3 and identify cloud spend drivers")
+    tenant_id: Optional[str] = Field(default="tenant_acme_corp", example="tenant_acme_corp")
+
 class DocumentCitation(BaseModel):
     document_title: str
     chunk_id: str
@@ -166,8 +171,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.12.0",
+        "version": "0.13.0",
         "features": [
+            "Agentic Query Planning & Sub-Goal Decomposition (DAGs)",
             "Multi-Modal Document Ingestion (OCR & Table Extraction)",
             "Agentic Query Router & Multi-Path Dispatch",
             "Semantic Vector Cache (<5ms)",
@@ -217,6 +223,17 @@ async def ingest_multimodal_document(payload: IngestMultiModalRequest):
 async def classify_query_route(payload: RouteClassifyRequest):
     """Inspects query intent and returns optimal routing decision (DIRECT_LLM, VECTOR_RAG, TEXT_TO_SQL, AGENTIC_MULTI_HOP)."""
     return query_router.classify_route(payload.query)
+
+@app.post("/api/v1/routing/plan", response_model=QueryPlan)
+async def plan_query_decomposition(payload: PlanQueryRequest):
+    """Decomposes a complex multi-hop or comparative query into a Directed Acyclic Graph (DAG) of sub-goals for parallel execution."""
+    return query_planner.decompose(payload.query)
+
+@app.post("/api/v1/routing/plan/execute", response_model=PlanExecutionResult)
+async def execute_query_plan(payload: PlanQueryRequest):
+    """Decomposes and executes the query plan layer-by-layer across parallel branches, synthesizing facts into a unified response."""
+    plan = query_planner.decompose(payload.query)
+    return query_planner.execute_plan(plan)
 
 @app.get("/api/v1/cache/stats")
 async def get_cache_statistics():
