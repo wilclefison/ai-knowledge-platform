@@ -17,11 +17,12 @@ from src.evals.ragas_evaluator import evaluator, EvalSample, EvalReport, MetricR
 from src.db.security import security_engine, TenantContext, ClearanceLevel
 from src.ingestion.multimodal_parser import multimodal_parser, MultiModalParsedDoc, MultiModalChunk, ExtractedTable, VisualFigure
 from src.routing.planner import query_planner, QueryPlan, PlanExecutionResult
+from src.retrieval.crag_evaluator import crag_evaluator, CRAGReport, GradedChunk, DocumentGrade, CRAGAction
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.13.0"
+    description="Enterprise RAG Platform: Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.14.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -109,6 +110,10 @@ class PlanQueryRequest(BaseModel):
     query: str = Field(..., example="Compare the financial margins of Q2 vs Q3 and identify cloud spend drivers")
     tenant_id: Optional[str] = Field(default="tenant_acme_corp", example="tenant_acme_corp")
 
+class GradeDocumentsRequest(BaseModel):
+    query: str = Field(..., example="AWS IAM MFA policy requirements")
+    chunks: List[Dict[str, Any]] = Field(..., example=[{"chunk_id": "c1", "text": "AWS IAM requires MFA on sensitive API calls."}])
+
 class DocumentCitation(BaseModel):
     document_title: str
     chunk_id: str
@@ -171,8 +176,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.13.0",
+        "version": "0.14.0",
         "features": [
+            "Autonomous Corrective RAG (CRAG) & Document Grading",
             "Agentic Query Planning & Sub-Goal Decomposition (DAGs)",
             "Multi-Modal Document Ingestion (OCR & Table Extraction)",
             "Agentic Query Router & Multi-Path Dispatch",
@@ -187,6 +193,15 @@ async def health_check():
             "Ragas Evals"
         ]
     }
+
+@app.post("/api/v1/retrieval/grade", response_model=CRAGReport)
+async def grade_retrieved_documents(payload: GradeDocumentsRequest):
+    """
+    Autonomous Corrective RAG (CRAG):
+    Evaluates retrieved chunks for semantic groundedness, strips boilerplate/noise,
+    and returns a confidence report with corrective actions (CORRECT, AMBIGUOUS_REWRITE, INCORRECT_FALLBACK).
+    """
+    return crag_evaluator.grade_documents(payload.query, payload.chunks)
 
 @app.post("/api/v1/ingest/multimodal", response_model=IngestMultiModalResponse)
 async def ingest_multimodal_document(payload: IngestMultiModalRequest):
