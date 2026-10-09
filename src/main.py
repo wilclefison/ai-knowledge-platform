@@ -18,11 +18,12 @@ from src.db.security import security_engine, TenantContext, ClearanceLevel
 from src.ingestion.multimodal_parser import multimodal_parser, MultiModalParsedDoc, MultiModalChunk, ExtractedTable, VisualFigure
 from src.routing.planner import query_planner, QueryPlan, PlanExecutionResult
 from src.retrieval.crag_evaluator import crag_evaluator, CRAGReport, GradedChunk, DocumentGrade, CRAGAction
+from src.retrieval.self_rag import SelfRAGEngine, SelfRAGOutput
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.14.0"
+    description="Enterprise RAG Platform: Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.15.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -114,6 +115,10 @@ class GradeDocumentsRequest(BaseModel):
     query: str = Field(..., example="AWS IAM MFA policy requirements")
     chunks: List[Dict[str, Any]] = Field(..., example=[{"chunk_id": "c1", "text": "AWS IAM requires MFA on sensitive API calls."}])
 
+class SelfRAGRequest(BaseModel):
+    query: str = Field(..., example="What are the IAM requirements for security in 2024?")
+    context: List[Dict[str, Any]] = Field(..., example=[{"content": "All IAM roles must enforce MFA."}])
+
 class DocumentCitation(BaseModel):
     document_title: str
     chunk_id: str
@@ -176,8 +181,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.14.0",
+        "version": "0.15.0",
         "features": [
+            "Self-RAG (Self-Reflective Retrieval & Hallucination Critique)",
             "Autonomous Corrective RAG (CRAG) & Document Grading",
             "Agentic Query Planning & Sub-Goal Decomposition (DAGs)",
             "Multi-Modal Document Ingestion (OCR & Table Extraction)",
@@ -202,6 +208,17 @@ async def grade_retrieved_documents(payload: GradeDocumentsRequest):
     and returns a confidence report with corrective actions (CORRECT, AMBIGUOUS_REWRITE, INCORRECT_FALLBACK).
     """
     return crag_evaluator.grade_documents(payload.query, payload.chunks)
+
+self_rag_engine = SelfRAGEngine()
+
+@app.post("/api/v1/generation/self-rag", response_model=SelfRAGOutput)
+async def generate_with_self_rag(payload: SelfRAGRequest):
+    """
+    Self-RAG (Self-Reflective Retrieval-Augmented Generation):
+    Generates a response while simultaneously critiquing its own support and usefulness
+    using [IS_SUP], [IS_USE], and [IS_REL] tokens.
+    """
+    return self_rag_engine.generate_with_reflection(payload.query, payload.context)
 
 @app.post("/api/v1/ingest/multimodal", response_model=IngestMultiModalResponse)
 async def ingest_multimodal_document(payload: IngestMultiModalRequest):
