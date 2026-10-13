@@ -19,11 +19,17 @@ from src.ingestion.multimodal_parser import multimodal_parser, MultiModalParsedD
 from src.routing.planner import query_planner, QueryPlan, PlanExecutionResult
 from src.retrieval.crag_evaluator import crag_evaluator, CRAGReport, GradedChunk, DocumentGrade, CRAGAction
 from src.retrieval.self_rag import SelfRAGEngine, SelfRAGOutput
+from src.retrieval.graph_rag import (
+    graph_rag_engine,
+    GraphExtractionResult,
+    GraphQueryResult,
+    GraphSchemaSummary
+)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.15.0"
+    description="Enterprise RAG Platform: Graph RAG & Knowledge Graph Entity Extraction (Multi-Hop Reasoning), Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.16.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -119,6 +125,14 @@ class SelfRAGRequest(BaseModel):
     query: str = Field(..., example="What are the IAM requirements for security in 2024?")
     context: List[Dict[str, Any]] = Field(..., example=[{"content": "All IAM roles must enforce MFA."}])
 
+class GraphExtractRequest(BaseModel):
+    text: str = Field(..., example="AWS IAM enforces mandatory MFA policies to protect the Production Database.")
+    chunk_id: Optional[str] = Field(default=None, example="chunk_sec_01")
+
+class GraphQueryRequest(BaseModel):
+    query: str = Field(..., example="How does AWS IAM and MFA authentication protect our production database and meet SOC2?")
+    max_hops: int = Field(default=2, ge=1, le=4, example=2)
+
 class DocumentCitation(BaseModel):
     document_title: str
     chunk_id: str
@@ -181,8 +195,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.15.0",
+        "version": "0.16.0",
         "features": [
+            "Graph RAG & Knowledge Graph Entity Extraction (Multi-Hop Triplet Traversal)",
             "Self-RAG (Self-Reflective Retrieval & Hallucination Critique)",
             "Autonomous Corrective RAG (CRAG) & Document Grading",
             "Agentic Query Planning & Sub-Goal Decomposition (DAGs)",
@@ -199,6 +214,32 @@ async def health_check():
             "Ragas Evals"
         ]
     }
+
+@app.post("/api/v1/graph/extract", response_model=GraphExtractionResult)
+async def extract_graph_entities_and_relations(payload: GraphExtractRequest):
+    """
+    Graph RAG Entity & Relation Extraction:
+    Parses unstructured text, identifies domain entities (SYSTEM, POLICY, DATASTORE, etc.),
+    maps relational verbs into typed directional edges, and updates graph ontology.
+    """
+    return graph_rag_engine.extract_entities_and_relations(payload.text, chunk_id=payload.chunk_id)
+
+@app.post("/api/v1/graph/query", response_model=GraphQueryResult)
+async def query_knowledge_graph(payload: GraphQueryRequest):
+    """
+    Graph RAG Multi-Hop Query & Reasoning Engine:
+    Identifies seed entity anchors, traverses knowledge graph up to max_hops,
+    synthesizes multi-hop logical paths, and compares against pure vector retrieval limitations.
+    """
+    return graph_rag_engine.query_graph(payload.query, max_hops=payload.max_hops)
+
+@app.get("/api/v1/graph/schema", response_model=GraphSchemaSummary)
+async def get_graph_schema_overview():
+    """
+    Knowledge Graph Topological Schema:
+    Returns node and edge distributions, entity type breakdowns, and top connected hubs.
+    """
+    return graph_rag_engine.get_schema_summary()
 
 @app.post("/api/v1/retrieval/grade", response_model=CRAGReport)
 async def grade_retrieved_documents(payload: GradeDocumentsRequest):
