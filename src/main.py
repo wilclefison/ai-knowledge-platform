@@ -25,11 +25,12 @@ from src.retrieval.graph_rag import (
     GraphQueryResult,
     GraphSchemaSummary
 )
+from src.retrieval.hyde_expander import hyde_expander, HyDEResult
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Graph RAG & Knowledge Graph Entity Extraction (Multi-Hop Reasoning), Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.16.0"
+    description="Enterprise RAG Platform: Query Expansion & HyDE (Hypothetical Document Embeddings), Graph RAG & Knowledge Graph Entity Extraction, Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.17.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -133,6 +134,9 @@ class GraphQueryRequest(BaseModel):
     query: str = Field(..., example="How does AWS IAM and MFA authentication protect our production database and meet SOC2?")
     max_hops: int = Field(default=2, ge=1, le=4, example=2)
 
+class HyDEQueryRequest(BaseModel):
+    query: str = Field(..., example="AWS IAM MFA policy 2024")
+
 class DocumentCitation(BaseModel):
     document_title: str
     chunk_id: str
@@ -195,8 +199,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.16.0",
+        "version": "0.17.0",
         "features": [
+            "Query Expansion & HyDE (Hypothetical Document Embeddings)",
             "Graph RAG & Knowledge Graph Entity Extraction (Multi-Hop Triplet Traversal)",
             "Self-RAG (Self-Reflective Retrieval & Hallucination Critique)",
             "Autonomous Corrective RAG (CRAG) & Document Grading",
@@ -214,6 +219,15 @@ async def health_check():
             "Ragas Evals"
         ]
     }
+
+@app.post("/api/v1/retrieval/hyde", response_model=HyDEResult)
+async def expand_query_with_hyde(payload: HyDEQueryRequest):
+    """
+    Hypothetical Document Embeddings (HyDE) & Multi-Query Expansion:
+    Synthesizes a plausible, dense hypothetical document to project queries into the
+    document embedding manifold and generates multi-perspective queries for RRF fusion.
+    """
+    return hyde_expander.process_query(payload.query)
 
 @app.post("/api/v1/graph/extract", response_model=GraphExtractionResult)
 async def extract_graph_entities_and_relations(payload: GraphExtractRequest):
