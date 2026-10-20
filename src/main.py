@@ -26,11 +26,12 @@ from src.retrieval.graph_rag import (
     GraphSchemaSummary
 )
 from src.retrieval.hyde_expander import hyde_expander, HyDEResult
+from src.agents.react_agent import react_agent, ReActExecutionResult, ToolDefinition
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Query Expansion & HyDE (Hypothetical Document Embeddings), Graph RAG & Knowledge Graph Entity Extraction, Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.17.0"
+    description="Enterprise RAG Platform: Agentic ReAct Tool Calling & Dynamic Vector Inspection, Query Expansion & HyDE (Hypothetical Document Embeddings), Graph RAG & Knowledge Graph Entity Extraction, Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.18.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -137,6 +138,9 @@ class GraphQueryRequest(BaseModel):
 class HyDEQueryRequest(BaseModel):
     query: str = Field(..., example="AWS IAM MFA policy 2024")
 
+class ReActQueryRequest(BaseModel):
+    query: str = Field(..., example="Inspect IAM MFA enforcement on production database and verify compliance")
+
 class DocumentCitation(BaseModel):
     document_title: str
     chunk_id: str
@@ -199,8 +203,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.17.0",
+        "version": "0.18.0",
         "features": [
+            "Agentic ReAct Tool Calling & Dynamic Vector Inspection",
             "Query Expansion & HyDE (Hypothetical Document Embeddings)",
             "Graph RAG & Knowledge Graph Entity Extraction (Multi-Hop Triplet Traversal)",
             "Self-RAG (Self-Reflective Retrieval & Hallucination Critique)",
@@ -219,6 +224,21 @@ async def health_check():
             "Ragas Evals"
         ]
     }
+
+@app.post("/api/v1/agents/react", response_model=ReActExecutionResult)
+async def execute_react_agent(payload: ReActQueryRequest):
+    """
+    Autonomous ReAct Agent Loop:
+    Executes iterative Thought ➔ Action ➔ Observation reasoning traces,
+    calling enterprise tools (vector inspection, knowledge graphs, compliance verification)
+    with strict loop detection and anti-recursion guardrails.
+    """
+    return react_agent.run(payload.query)
+
+@app.get("/api/v1/agents/tools", response_model=List[ToolDefinition])
+async def list_agent_tools():
+    """Returns registry of available tools for autonomous ReAct agent execution."""
+    return react_agent.get_available_tools()
 
 @app.post("/api/v1/retrieval/hyde", response_model=HyDEResult)
 async def expand_query_with_hyde(payload: HyDEQueryRequest):
