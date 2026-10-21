@@ -27,11 +27,12 @@ from src.retrieval.graph_rag import (
 )
 from src.retrieval.hyde_expander import hyde_expander, HyDEResult
 from src.agents.react_agent import react_agent, ReActExecutionResult, ToolDefinition
+from src.mcp.server import mcp_server, JSONRPCRequest
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Agentic ReAct Tool Calling & Dynamic Vector Inspection, Query Expansion & HyDE (Hypothetical Document Embeddings), Graph RAG & Knowledge Graph Entity Extraction, Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.18.0"
+    description="Enterprise RAG Platform: Model Context Protocol (MCP) Server & Standardized Tool Integration, Agentic ReAct Tool Calling & Dynamic Vector Inspection, Query Expansion & HyDE (Hypothetical Document Embeddings), Graph RAG & Knowledge Graph Entity Extraction, Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.19.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -203,8 +204,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.18.0",
+        "version": "0.19.0",
         "features": [
+            "Model Context Protocol (MCP) Server & Standardized Tool Integration",
             "Agentic ReAct Tool Calling & Dynamic Vector Inspection",
             "Query Expansion & HyDE (Hypothetical Document Embeddings)",
             "Graph RAG & Knowledge Graph Entity Extraction (Multi-Hop Triplet Traversal)",
@@ -224,6 +226,20 @@ async def health_check():
             "Ragas Evals"
         ]
     }
+
+@app.post("/api/v1/mcp/jsonrpc")
+async def handle_mcp_jsonrpc_request(payload: JSONRPCRequest):
+    """
+    Model Context Protocol (MCP) JSON-RPC 2.0 Dispatcher:
+    Standardized interoperability endpoint handling 'initialize', 'tools/list',
+    'tools/call', 'resources/list', 'resources/read', and 'prompts/list'.
+    """
+    return mcp_server.handle_jsonrpc(payload.model_dump())
+
+@app.get("/api/v1/mcp/capabilities")
+async def get_mcp_capabilities():
+    """Returns summary of MCP server capabilities and exposed primitives."""
+    return mcp_server.get_server_capabilities()
 
 @app.post("/api/v1/agents/react", response_model=ReActExecutionResult)
 async def execute_react_agent(payload: ReActQueryRequest):
