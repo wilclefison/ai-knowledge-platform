@@ -27,12 +27,13 @@ from src.retrieval.graph_rag import (
 )
 from src.retrieval.hyde_expander import hyde_expander, HyDEResult
 from src.agents.react_agent import react_agent, ReActExecutionResult, ToolDefinition
+from src.agents.swarm import swarm_orchestrator, SwarmExecutionResult, LeaderElectionResult
 from src.mcp.server import mcp_server, JSONRPCRequest
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Model Context Protocol (MCP) Server & Standardized Tool Integration, Agentic ReAct Tool Calling & Dynamic Vector Inspection, Query Expansion & HyDE (Hypothetical Document Embeddings), Graph RAG & Knowledge Graph Entity Extraction, Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.19.0"
+    description="Enterprise RAG Platform: Federated Multi-Agent Swarm with Dynamic Leader Election, Model Context Protocol (MCP) Server & Standardized Tools, Agentic ReAct Tool Calling & Dynamic Vector Inspection, Query Expansion & HyDE (Hypothetical Document Embeddings), Graph RAG & Knowledge Graph Entity Extraction, Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.20.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -142,6 +143,9 @@ class HyDEQueryRequest(BaseModel):
 class ReActQueryRequest(BaseModel):
     query: str = Field(..., example="Inspect IAM MFA enforcement on production database and verify compliance")
 
+class SwarmTaskRequest(BaseModel):
+    task: str = Field(..., example="Audit Aurora PostgreSQL database security, latency, and SOC2 compliance")
+
 class DocumentCitation(BaseModel):
     document_title: str
     chunk_id: str
@@ -204,8 +208,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.19.0",
+        "version": "0.20.0",
         "features": [
+            "Federated Multi-Agent Swarm with Dynamic Leader Election",
             "Model Context Protocol (MCP) Server & Standardized Tool Integration",
             "Agentic ReAct Tool Calling & Dynamic Vector Inspection",
             "Query Expansion & HyDE (Hypothetical Document Embeddings)",
@@ -255,6 +260,24 @@ async def execute_react_agent(payload: ReActQueryRequest):
 async def list_agent_tools():
     """Returns registry of available tools for autonomous ReAct agent execution."""
     return react_agent.get_available_tools()
+
+@app.post("/api/v1/swarm/execute", response_model=SwarmExecutionResult)
+async def execute_swarm_task(payload: SwarmTaskRequest):
+    """
+    Federated Multi-Agent Swarm Execution:
+    Elects domain-optimal leader dynamically, coordinates parallel specialist agent tasks
+    (Security, Performance, Compliance, FinOps), and synthesizes a conflict-resolved consensus result.
+    """
+    return swarm_orchestrator.execute_swarm(payload.task)
+
+@app.post("/api/v1/swarm/elect", response_model=LeaderElectionResult)
+async def elect_swarm_leader(payload: SwarmTaskRequest):
+    """
+    Dynamic Swarm Leader Election:
+    Computes domain fitness based on task keyword affinity and node reputation scores to elect
+    the optimal coordinator node.
+    """
+    return swarm_orchestrator.elect_leader(payload.task)
 
 @app.post("/api/v1/retrieval/hyde", response_model=HyDEResult)
 async def expand_query_with_hyde(payload: HyDEQueryRequest):
