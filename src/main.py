@@ -28,12 +28,19 @@ from src.retrieval.graph_rag import (
 from src.retrieval.hyde_expander import hyde_expander, HyDEResult
 from src.agents.react_agent import react_agent, ReActExecutionResult, ToolDefinition
 from src.agents.swarm import swarm_orchestrator, SwarmExecutionResult, LeaderElectionResult
+from src.retrieval.self_healing_index import (
+    self_healing_index_engine,
+    IndexMetricReport,
+    SelfHealingResult,
+    ShardingPolicyResult,
+    ShardPartition
+)
 from src.mcp.server import mcp_server, JSONRPCRequest
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Federated Multi-Agent Swarm with Dynamic Leader Election, Model Context Protocol (MCP) Server & Standardized Tools, Agentic ReAct Tool Calling & Dynamic Vector Inspection, Query Expansion & HyDE (Hypothetical Document Embeddings), Graph RAG & Knowledge Graph Entity Extraction, Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Parser (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.20.0"
+    description="Enterprise RAG Platform: Autonomous Self-Healing Vector Index & Dynamic Sharding, Federated Multi-Agent Swarm with Dynamic Leader Election, Model Context Protocol (MCP) Server & Standardized Tools, Agentic ReAct Tool Calling & Dynamic Vector Inspection, Query Expansion & HyDE (Hypothetical Document Embeddings), Graph RAG & Knowledge Graph Entity Extraction, Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Ingestion (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.21.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -146,6 +153,20 @@ class ReActQueryRequest(BaseModel):
 class SwarmTaskRequest(BaseModel):
     task: str = Field(..., example="Audit Aurora PostgreSQL database security, latency, and SOC2 compliance")
 
+class IndexDegradeSimulateRequest(BaseModel):
+    index_name: str = Field(default="idx_documents_embedding_hnsw")
+    dead_tuples_ratio: float = Field(default=0.38, ge=0.0, le=1.0)
+    recall_drift: float = Field(default=0.24, ge=0.0, le=1.0)
+    fragmentation: float = Field(default=41.5, ge=0.0, le=100.0)
+    p99_latency_ms: float = Field(default=52.4, ge=0.0)
+
+class IndexHealRequest(BaseModel):
+    index_name: str = Field(default="idx_documents_embedding_hnsw")
+
+class ShardingEvaluateRequest(BaseModel):
+    tenant_id: str = Field(..., example="tenant_fintech_corp")
+    vector_count: int = Field(..., example=350000)
+
 class DocumentCitation(BaseModel):
     document_title: str
     chunk_id: str
@@ -208,8 +229,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.20.0",
+        "version": "0.21.0",
         "features": [
+            "Autonomous Self-Healing Vector Index & Dynamic Sharding",
             "Federated Multi-Agent Swarm with Dynamic Leader Election",
             "Model Context Protocol (MCP) Server & Standardized Tool Integration",
             "Agentic ReAct Tool Calling & Dynamic Vector Inspection",
@@ -278,6 +300,53 @@ async def elect_swarm_leader(payload: SwarmTaskRequest):
     the optimal coordinator node.
     """
     return swarm_orchestrator.elect_leader(payload.task)
+
+@app.get("/api/v1/index/health", response_model=List[IndexMetricReport])
+async def get_all_indexes_health():
+    """
+    Autonomous Vector Index Telemetry & Health Inspection:
+    Inspects live memory page fragmentation, dead tuple ratio, HNSW graph connectivity,
+    and recall drift across all registered vector tables.
+    """
+    return self_healing_index_engine.get_all_indexes_health()
+
+@app.post("/api/v1/index/simulate-degradation", response_model=IndexMetricReport)
+async def simulate_index_degradation(payload: IndexDegradeSimulateRequest):
+    """
+    Simulates vacuum debt and graph degradation on a vector index:
+    Emulates heavy update/delete churn leading to orphaned embeddings, dead nodes,
+    and degraded recall.
+    """
+    return self_healing_index_engine.simulate_degradation(
+        index_name=payload.index_name,
+        dead_tuples_ratio=payload.dead_tuples_ratio,
+        recall_drift=payload.recall_drift,
+        fragmentation=payload.fragmentation,
+        p99_latency_ms=payload.p99_latency_ms
+    )
+
+@app.post("/api/v1/index/heal", response_model=SelfHealingResult)
+async def heal_vector_index(payload: IndexHealRequest):
+    """
+    Autonomous Zero-Downtime Index Self-Healing:
+    Executes concurrent shadow reindexing (CREATE INDEX CONCURRENTLY), re-links graph edges,
+    and performs an atomic transactional catalog pointer swap with 0ms downtime.
+    """
+    return self_healing_index_engine.auto_heal_index(payload.index_name)
+
+@app.post("/api/v1/index/sharding/evaluate", response_model=ShardingPolicyResult)
+async def evaluate_tenant_sharding(payload: ShardingEvaluateRequest):
+    """
+    Dynamic Vector Sharding Policy Engine:
+    Evaluates tenant embedding volume and isolates high-density enterprise tenants into dedicated
+    HNSW partitions with custom graph hyperparameters (M=32, ef_construction=128).
+    """
+    return self_healing_index_engine.evaluate_sharding_policy(payload.tenant_id, payload.vector_count)
+
+@app.get("/api/v1/index/shards", response_model=List[ShardPartition])
+async def list_shard_partitions():
+    """Returns active tenant vector shard topology and partition mappings."""
+    return self_healing_index_engine.get_shard_topology()
 
 @app.post("/api/v1/retrieval/hyde", response_model=HyDEResult)
 async def expand_query_with_hyde(payload: HyDEQueryRequest):
