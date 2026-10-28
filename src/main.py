@@ -35,12 +35,19 @@ from src.retrieval.self_healing_index import (
     ShardingPolicyResult,
     ShardPartition
 )
+from src.cache.cdc_sync import (
+    cdc_sync_engine,
+    CDCEvent,
+    CDCOperation,
+    InvalidationResult,
+    CDCPipelineStats
+)
 from src.mcp.server import mcp_server, JSONRPCRequest
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise RAG Platform: Autonomous Self-Healing Vector Index & Dynamic Sharding, Federated Multi-Agent Swarm with Dynamic Leader Election, Model Context Protocol (MCP) Server & Standardized Tools, Agentic ReAct Tool Calling & Dynamic Vector Inspection, Query Expansion & HyDE (Hypothetical Document Embeddings), Graph RAG & Knowledge Graph Entity Extraction, Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Ingestion (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
-    version="0.21.0"
+    description="Enterprise RAG Platform: Semantic Cache Invalidation & Real-Time CDC Sync, Autonomous Self-Healing Vector Index & Dynamic Sharding, Federated Multi-Agent Swarm with Dynamic Leader Election, Model Context Protocol (MCP) Server & Standardized Tools, Agentic ReAct Tool Calling & Dynamic Vector Inspection, Query Expansion & HyDE (Hypothetical Document Embeddings), Graph RAG & Knowledge Graph Entity Extraction, Self-RAG (Self-Reflective Retrieval), Autonomous Corrective RAG (CRAG) & Document Grading, Agentic Query Planning & Sub-Goal Decomposition (DAGs), Multi-Modal Document Ingestion (OCR & Tables), Agentic Query Router, Semantic Vector Cache, Self-Querying SQL Filters, Parent-Document Indexing, Multi-Tenant RLS Security, Hybrid Search, Cross-Encoder Re-ranking, Contextual Compression, Langfuse Tracing and Automated Evals.",
+    version="0.22.0"
 )
 
 chunker = SemanticChunker(target_chunk_size=settings.CHUNK_SIZE, overlap=settings.CHUNK_OVERLAP)
@@ -167,6 +174,13 @@ class ShardingEvaluateRequest(BaseModel):
     tenant_id: str = Field(..., example="tenant_fintech_corp")
     vector_count: int = Field(..., example=350000)
 
+class CDCMutationSimulateRequest(BaseModel):
+    tenant_id: str = Field(default="tenant_acme_corp", example="tenant_acme_corp")
+    chunk_id: str = Field(..., example="chunk_seed_1")
+    op: CDCOperation = Field(default=CDCOperation.UPDATE)
+    updated_text: Optional[str] = Field(default="AWS IAM now requires WebAuthn FIDO2 keys for all admin roles.")
+    document_title: Optional[str] = Field(default="AWS Security Architecture Whitepaper (2024)")
+
 class DocumentCitation(BaseModel):
     document_title: str
     chunk_id: str
@@ -229,8 +243,9 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
-        "version": "0.21.0",
+        "version": "0.22.0",
         "features": [
+            "Semantic Cache Invalidation & Real-Time CDC Sync",
             "Autonomous Self-Healing Vector Index & Dynamic Sharding",
             "Federated Multi-Agent Swarm with Dynamic Leader Election",
             "Model Context Protocol (MCP) Server & Standardized Tool Integration",
@@ -347,6 +362,34 @@ async def evaluate_tenant_sharding(payload: ShardingEvaluateRequest):
 async def list_shard_partitions():
     """Returns active tenant vector shard topology and partition mappings."""
     return self_healing_index_engine.get_shard_topology()
+
+@app.post("/api/v1/cache/cdc/event", response_model=InvalidationResult)
+async def process_cdc_stream_event(payload: CDCEvent):
+    """
+    Real-Time CDC Stream Ingestion & Surgical Semantic Cache Invalidation:
+    Ingests PostgreSQL WAL replication events (INSERT, UPDATE, DELETE).
+    Executes selective vector-proximity eviction on mutated chunks while preserving unrelated cache entries.
+    """
+    return cdc_sync_engine.process_cdc_event(payload)
+
+@app.post("/api/v1/cache/cdc/simulate", response_model=InvalidationResult)
+async def simulate_cdc_mutation(payload: CDCMutationSimulateRequest):
+    """
+    Simulates a PostgreSQL document mutation streamed over Debezium/WAL:
+    Demonstrates targeted cache invalidation with optimistic LSN timestamp stamping.
+    """
+    return cdc_sync_engine.simulate_cdc_mutation(
+        tenant_id=payload.tenant_id,
+        chunk_id=payload.chunk_id,
+        op=payload.op,
+        updated_text=payload.updated_text,
+        document_title=payload.document_title
+    )
+
+@app.get("/api/v1/cache/cdc/stats", response_model=CDCPipelineStats)
+async def get_cdc_pipeline_stats():
+    """Returns real-time CDC synchronization telemetry and WAL replication metrics."""
+    return cdc_sync_engine.get_pipeline_stats()
 
 @app.post("/api/v1/retrieval/hyde", response_model=HyDEResult)
 async def expand_query_with_hyde(payload: HyDEQueryRequest):
